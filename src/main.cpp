@@ -1,102 +1,80 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
+#include <bitset>
+#include <atomic>
+#include <cmath>
+#include <STM32FreeRTOS.h>
+#include <ES_CAN.h>
+#include "globals.h"
+#include "LockGuard.h"
+#include "hardware.h"
+#include "scanKeys.h"
+#include "display.h"
+#include "knob.h"  
 
-//Constants
-  const uint32_t interval = 100; //Display update interval
 
-//Pin definitions
-  //Row select and enable
-  const int RA0_PIN = D3;
-  const int RA1_PIN = D6;
-  const int RA2_PIN = D12;
-  const int REN_PIN = A5;
+// ---------------------------------------------------------------------
+//                     AUDIO & KEY PARAMETERS
+// ---------------------------------------------------------------------
 
-  //Matrix input and output
-  const int C0_PIN = A2;
-  const int C1_PIN = D9;
-  const int C2_PIN = A6;
-  const int C3_PIN = D1;
-  const int OUT_PIN = D11;
+const uint32_t SAMPLE_RATE = 22000;
+constexpr float BASE_FREQ = 440.0;
+constexpr uint8_t NUM_KEYS = 12;
+constexpr uint8_t MAX_VOLUME = 8;
 
-  //Audio analogue out
-  const int OUTL_PIN = A4;
-  const int OUTR_PIN = A3;
+// Create an atomic variable and a knob instance.
+std::atomic<int8_t> knob3Rotation(0);
+Knob knob3Class(knob3Rotation);
 
-  //Joystick analogue in
-  const int JOYY_PIN = A0;
-  const int JOYX_PIN = A1;
-
-  //Output multiplexer bits
-  const int DEN_BIT = 3;
-  const int DRST_BIT = 4;
-  const int HKOW_BIT = 5;
-  const int HKOE_BIT = 6;
-
-//Display driver object
-U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
-
-//Function to set outputs using key matrix
-void setOutMuxBit(const uint8_t bitIdx, const bool value) {
-      digitalWrite(REN_PIN,LOW);
-      digitalWrite(RA0_PIN, bitIdx & 0x01);
-      digitalWrite(RA1_PIN, bitIdx & 0x02);
-      digitalWrite(RA2_PIN, bitIdx & 0x04);
-      digitalWrite(OUT_PIN,value);
-      digitalWrite(REN_PIN,HIGH);
-      delayMicroseconds(2);
-      digitalWrite(REN_PIN,LOW);
+// Audio sampling ISR – calculates waveform value and writes to the analogue output.
+void sampleISR() {
+  static uint32_t phaseAcc = 0;
+  phaseAcc += currentStepSize;
+  int32_t Vout = (phaseAcc >> 24) - 128;
+  Vout = Vout >> (MAX_VOLUME - knob3Class.getRotation());
+  // Convert from signed (-128..127) to unsigned (0..255) and write output.
+  analogWrite(OUTR_PIN, (Vout + 128)/20);
 }
 
 void setup() {
-  // put your setup code here, to run once:
+  // Initialize hardware: pin configurations and peripherals.
+  initHardware();
+  initDisplay();
 
-  //Set pin directions
-  pinMode(RA0_PIN, OUTPUT);
-  pinMode(RA1_PIN, OUTPUT);
-  pinMode(RA2_PIN, OUTPUT);
-  pinMode(REN_PIN, OUTPUT);
-  pinMode(OUT_PIN, OUTPUT);
-  pinMode(OUTL_PIN, OUTPUT);
-  pinMode(OUTR_PIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
-
-  pinMode(C0_PIN, INPUT);
-  pinMode(C1_PIN, INPUT);
-  pinMode(C2_PIN, INPUT);
-  pinMode(C3_PIN, INPUT);
-  pinMode(JOYX_PIN, INPUT);
-  pinMode(JOYY_PIN, INPUT);
-
-  //Initialise display
-  setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
-  delayMicroseconds(2);
-  setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
-  u8g2.begin();
-  setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
-
-  //Initialise UART
+  // Initialize Serial communication.
   Serial.begin(9600);
   Serial.println("Hello World");
+
+  // Attach the audio sampling ISR and initialize audio.
+  sampleTimer.attachInterrupt(sampleISR);
+  initAudio();
+
+  // Create the global mutex for shared state.
+  sysState.mutex = xSemaphoreCreateMutex();
+  if (sysState.mutex == NULL) {
+      Serial.println("Mutex creation failed!");
+      while (1);
+  }
+
+  // Initialize the CAN bus
+  CAN_Init(true);
+  setCANFilter(0x123,0x7ff);
+  CAN_Start();
+
+  // Create tasks for scanning keys and updating the display.
+  TaskHandle_t scanKeysHandle = NULL;
+  xTaskCreate(scanKeysTask, "scanKeys", 214, NULL, 1, &scanKeysHandle);
+
+  TaskHandle_t displayUpdateHandle = NULL;
+  xTaskCreate(displayUpdateTask, "displayUpdate", 512, NULL, 2, &displayUpdateHandle);
+
+  // Start the FreeRTOS scheduler.
+  vTaskStartScheduler();
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-  static uint32_t next = millis();
-  static uint32_t count = 0;
-
-  while (millis() < next);  //Wait for next interval
-
-  next += interval;
-
-  //Update display
-  u8g2.clearBuffer();         // clear the internal memory
-  u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  u8g2.drawStr(2,10,"Helllo World!");  // write something to the internal memory
-  u8g2.setCursor(2,20);
-  u8g2.print(count++);
-  u8g2.sendBuffer();          // transfer internal memory to the display
-
-  //Toggle LED
-  digitalToggle(LED_BUILTIN);
-  
+  // Empty loop – tasks manage all operations.
 }
+
+
+
