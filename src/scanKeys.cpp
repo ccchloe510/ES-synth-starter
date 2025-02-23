@@ -1,14 +1,17 @@
 #include <Arduino.h>
 #include <bitset>
 #include <STM32FreeRTOS.h>
+#include <atomic>
+#include <cmath>
+#include <ES_CAN.h>
 #include "scanKeys.h"
 #include "globals.h"
 #include "hardware.h"
 #include "LockGuard.h"
 #include "knob.h"
-#include <atomic>
-#include <cmath>
-#include <ES_CAN.h>
+#include "can_tx_task.h"
+#include "decodeTask.h"
+
 
 // Audio and key constants
 const uint32_t SAMPLE_RATE = 22000;
@@ -16,12 +19,12 @@ constexpr float BASE_FREQ = 440.0;
 constexpr uint8_t NUM_KEYS = 12;
 
 // Helper to calculate step size
-constexpr uint32_t calcStepSize(float freq) {
+const uint32_t calcStepSize(float freq) {
   return (uint32_t)((pow(2, 32) * freq) / SAMPLE_RATE);
 }
 
 // Precalculate step sizes for each musical key
-constexpr uint32_t stepSizes[NUM_KEYS] = {
+const uint32_t stepSizes[NUM_KEYS] = {
   calcStepSize(BASE_FREQ * pow(2, -9.0/12)),  // C
   calcStepSize(BASE_FREQ * pow(2, -8.0/12)),  // C#
   calcStepSize(BASE_FREQ * pow(2, -7.0/12)),  // D
@@ -85,7 +88,7 @@ void scanKeysTask(void *pvParameters) {
         uint8_t knobB = knobCols[1];
         knob3Class.updateState(knobA, knobB);
         knob3Class.constrainRotation();
-        Serial.println(knob3Class.getRotation());
+        //Serial.println(knob3Class.getRotation());
 
         // 4) Compare with previousInputs to detect key changes
         for (uint8_t i = 0; i < NUM_KEYS; i++) {
@@ -107,7 +110,7 @@ void scanKeysTask(void *pvParameters) {
                 TX_Message[2] = i;
 
                 // Send over CAN with ID 0x123
-                CAN_TX(0x123, TX_Message);
+                xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
             }
         }
 
